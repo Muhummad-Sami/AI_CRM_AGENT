@@ -2,3 +2,6 @@ myenv/
 .env
 __pycache__/
 *.pyc
+*.pyo
+.DS_Store
+api/__pycache__/

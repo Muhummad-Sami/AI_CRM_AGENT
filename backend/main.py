@@ -1,8 +1,13 @@
 import os
 import json
-import resend
+import smtplib
+import csv
+import io
 
-from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from fastapi import FastAPI, HTTPException, Response
 from google import genai
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -20,8 +25,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 # =========================
 # CLIENT SETUP
@@ -36,8 +41,6 @@ client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-resend.api_key = RESEND_API_KEY
-
 
 # =========================
 # FASTAPI
@@ -47,6 +50,25 @@ app = FastAPI(
     title="AI CRM Agent",
     description="AI-powered lead qualification and communication system",
     version="1.0.0"
+)
+
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+if FRONTEND_URL:
+    allowed_origins.append(FRONTEND_URL.rstrip("/"))
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https?://.*\.vercel\.app|http://(localhost|127\.0\.0\.1):[0-9]+",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -61,6 +83,124 @@ class LeadCreate(BaseModel):
     company: str | None = None
     message: str
 
+class LeadStatusUpdate(BaseModel):
+    contact_status: str
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class BatchStatusUpdate(BaseModel):
+    lead_ids: list[str]
+    contact_status: str
+
+class BatchDeleteRequest(BaseModel):
+    lead_ids: list[str]
+
+class LeadUpdate(BaseModel):
+    name: str | None = None
+    email: EmailStr | None = None
+    phone: str | None = None
+    company: str | None = None
+    message: str | None = None
+    contact_status: str | None = None
+    priority: str | None = None
+    ai_score: int | None = None
+    ai_response: str | None = None
+    intent: str | None = None
+    is_spam: bool | None = None
+    should_contact: bool | None = None
+
+class TestEmailRequest(BaseModel):
+    target_email: EmailStr
+
+# =========================
+# ADMIN AUTHENTICATION
+# =========================
+
+@app.post("/auth/login")
+def admin_login(credentials: AdminLoginRequest):
+    # 1. Try Supabase Native Auth (supabase.auth.sign_in_with_password)
+    try:
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": credentials.email,
+            "password": credentials.password
+        })
+        if auth_response and auth_response.user and auth_response.session:
+            user = auth_response.user
+            session = auth_response.session
+            user_name = user.email.split("@")[0].title()
+            if user.user_metadata and "name" in user.user_metadata:
+                user_name = user.user_metadata["name"]
+                
+            return {
+                "success": True,
+                "message": "Supabase Native Auth successful",
+                "token": session.access_token,
+                "user": {
+                    "email": user.email,
+                    "role": getattr(user, "role", "admin") or "admin",
+                    "name": user_name
+                }
+            }
+    except Exception as e:
+        print("Supabase Native Auth check exception:", e)
+
+    # 2. Query Supabase 'admin_users' table
+    try:
+        response = supabase.table("admin_users").select("*").eq("email", credentials.email).eq("password", credentials.password).execute()
+        if response.data and len(response.data) > 0:
+            db_user = response.data[0]
+            return {
+                "success": True,
+                "message": "Authentication successful",
+                "token": f"admin_session_token_{db_user.get('id', 'crm_2026')}",
+                "user": {
+                    "email": db_user.get("email"),
+                    "role": db_user.get("role", "admin"),
+                    "name": db_user.get("name", "Admin User")
+                }
+            }
+    except Exception as e:
+        print("Supabase admin_users check error:", e)
+
+    # If credentials are not valid in Supabase Auth or admin_users table:
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid admin email or password"
+    )
+
+@app.post("/auth/verify")
+def verify_token(data: dict):
+    token = data.get("token")
+    if token and (token.startswith("admin_session_token") or len(token) > 20):
+        return {
+            "valid": True,
+            "user": {
+                "role": "admin"
+            }
+        }
+    return {
+        "valid": False
+    }
+
+# =========================
+# LIST GEMINI MODELS
+# =========================
+
+@app.get("/models")
+def list_models():
+
+    models = client.models.list()
+
+    return {
+        "models": [
+            model.name
+            for model in models
+            if "generateContent"
+            in (model.supported_actions or [])
+        ]
+    }
 
 # =========================
 # AI LEAD QUALIFICATION
@@ -149,39 +289,49 @@ If should_contact is false, the response should say:
 # =========================
 
 def send_lead_response(email, name, message):
-
     try:
+        msg = MIMEMultipart("alternative")
 
-        resend.Emails.send({
-            "from": "AI CRM <onboarding@resend.dev>",
-            "to": [email],
-            "subject": "Thank you for contacting us",
-            "html": f"""
-            <html>
-                <body>
+        msg["Subject"] = "Thank you for contacting us"
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = email
 
-                    <p>Hi {name},</p>
+        html = f"""
+        <html>
+            <body>
+                <p>Hi {name},</p>
 
-                    <p>{message}</p>
+                <p>{message}</p>
 
-                    <p>
-                        Best regards,<br>
-                        AI CRM Team
-                    </p>
+                <p>
+                    Best regards,<br>
+                    AI CRM Team
+                </p>
+            </body>
+        </html>
+        """
 
-                </body>
-            </html>
-            """
-        })
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(
+                GMAIL_ADDRESS,
+                GMAIL_APP_PASSWORD
+            )
+            server.sendmail(
+                GMAIL_ADDRESS,
+                email,
+                msg.as_string()
+            )
+
+        print("Email sent successfully to:", email)
 
         return True
 
     except Exception as e:
-
         print("Email sending failed:", e)
-
         return False
-
 
 # =========================
 # PROCESS LEAD
@@ -316,26 +466,37 @@ def root():
 
 @app.post("/leads")
 def create_lead(lead: LeadCreate):
+    try:
+        data = {
+            "name": lead.name,
+            "email": str(lead.email),
+            "phone": lead.phone,
+            "company": lead.company,
+            "message": lead.message
+        }
 
-    data = {
-        "name": lead.name,
-        "email": str(lead.email),
-        "phone": lead.phone,
-        "company": lead.company,
-        "message": lead.message
-    }
+        # Save lead
+        response = supabase.table("leads").insert(data).execute()
+        if not response.data:
+            raise HTTPException(status_code=400, detail="Failed to insert lead into Supabase")
 
-    # Save lead
-    response = supabase.table(
-        "leads"
-    ).insert(data).execute()
+        created_lead = response.data[0]
 
-    created_lead = response.data[0]
+        # Process immediately
+        result = process_lead(created_lead)
 
-    return {
-        "message": "Lead created successfully",
-        "lead_id": created_lead["id"]
-    }
+        return {
+            "message": "Lead created successfully",
+            **result
+        }
+    except Exception as e:
+        error_msg = str(e)
+        if "row-level security" in error_msg.lower() or "42501" in error_msg:
+            raise HTTPException(
+                status_code=403,
+                detail="Supabase RLS policy blocked lead insertion. Disable RLS or use service_role key."
+            )
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 # =========================
@@ -344,18 +505,134 @@ def create_lead(lead: LeadCreate):
 
 @app.get("/leads")
 def get_leads():
+    try:
+        response = supabase.table("leads").select("*").order("created_at", desc=True).execute()
+        leads_list = response.data or []
+        return {
+            "count": len(leads_list),
+            "leads": leads_list
+        }
+    except Exception as e:
+        import traceback
+        print("Error fetching leads from Supabase:", e)
+        traceback.print_exc()
+        return {
+            "count": 0,
+            "leads": [],
+            "error_detail": str(e)
+        }
 
-    response = supabase.table(
-        "leads"
-    ).select("*").order(
-        "created_at",
-        desc=True
-    ).execute()
+
+# =========================
+# EXPORT LEADS TO CSV
+# =========================
+
+@app.get("/leads/export")
+def export_leads_csv():
+    response = supabase.table("leads").select("*").order("created_at", desc=True).execute()
+    leads = response.data or []
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header row
+    writer.writerow([
+        "ID", "Name", "Email", "Phone", "Company", "Contact Status",
+        "AI Score", "Priority", "Is Spam", "Should Contact", "Intent",
+        "Created At"
+    ])
+
+    for lead in leads:
+        writer.writerow([
+            lead.get("id", ""),
+            lead.get("name", ""),
+            lead.get("email", ""),
+            lead.get("phone", ""),
+            lead.get("company", ""),
+            lead.get("contact_status", ""),
+            lead.get("ai_score", ""),
+            lead.get("priority", ""),
+            lead.get("is_spam", ""),
+            lead.get("should_contact", ""),
+            lead.get("intent", ""),
+            lead.get("created_at", "")
+        ])
+
+    csv_content = output.getvalue()
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=leads_export.csv"
+        }
+    )
+
+
+# =========================
+# GET SINGLE LEAD
+# =========================
+
+@app.get("/leads/{lead_id}")
+def get_lead_by_id(lead_id: str):
+    response = supabase.table("leads").select("*").eq("id", lead_id).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return {"lead": response.data[0]}
+
+
+# =========================
+# UPDATE / EDIT LEAD
+# =========================
+
+@app.put("/leads/{lead_id}")
+def update_lead(lead_id: str, data: LeadUpdate):
+    update_fields = {k: v for k, v in data.model_dump().items() if v is not None}
+    if "email" in update_fields:
+        update_fields["email"] = str(update_fields["email"])
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+
+    response = supabase.table("leads").update(update_fields).eq("id", lead_id).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Lead not found or update failed")
 
     return {
-        "count": len(response.data),
-        "leads": response.data
+        "success": True,
+        "message": "Lead updated successfully",
+        "lead": response.data[0]
     }
+
+
+# =========================
+# DELETE LEAD
+# =========================
+
+@app.delete("/leads/{lead_id}")
+def delete_lead(lead_id: str):
+    response = supabase.table("leads").delete().eq("id", lead_id).execute()
+    return {
+        "success": True,
+        "message": "Lead deleted successfully",
+        "deleted_id": lead_id
+    }
+
+
+# =========================
+# BATCH DELETE LEADS
+# =========================
+
+@app.post("/leads/batch-delete")
+def batch_delete_leads(data: BatchDeleteRequest):
+    if not data.lead_ids:
+        return {"success": True, "deleted_count": 0}
+
+    response = supabase.table("leads").delete().in_("id", data.lead_ids).execute()
+    return {
+        "success": True,
+        "message": f"Deleted {len(response.data or [])} leads",
+        "deleted_count": len(response.data or [])
+    }
+
 
 
 # =========================
@@ -364,25 +641,12 @@ def get_leads():
 
 @app.post("/leads/{lead_id}/qualify")
 def qualify_lead_endpoint(lead_id: str):
+    response = supabase.table("leads").select("*").eq("id", lead_id).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Lead not found")
 
-    response = supabase.table(
-        "leads"
-    ).select("*").eq(
-        "id",
-        lead_id
-    ).single().execute()
-
-    lead = response.data
-
-    if not lead:
-
-        return {
-            "error": "Lead not found"
-        }
-
-    result = process_lead(
-        lead
-    )
+    lead = response.data[0]
+    result = process_lead(lead)
 
     return {
         "message": "Lead qualified successfully",
@@ -415,20 +679,93 @@ def lead_created_webhook(data: dict):
     }
 
 
-# =========================
-# LIST GEMINI MODELS
-# =========================
+@app.patch("/leads/{lead_id}/status")
+def update_lead_status(
+    lead_id: str,
+    status: LeadStatusUpdate
+):
 
-@app.get("/models")
-def list_models():
+    allowed_statuses = [
+        "pending",
+        "qualified",
+        "contacted",
+        "rejected"
+    ]
 
-    models = client.models.list()
+    if status.contact_status not in allowed_statuses:
+        return {
+            "success": False,
+            "message": "Invalid contact status"
+        }
+
+    response = supabase.table(
+        "leads"
+    ).update({
+        "contact_status": status.contact_status
+    }).eq(
+        "id",
+        lead_id
+    ).execute()
+
+    if not response.data:
+        return {
+            "success": False,
+            "message": "Lead not found"
+        }
 
     return {
-        "models": [
-            model.name
-            for model in models
-            if "generateContent"
-            in (model.supported_actions or [])
-        ]
+        "success": True,
+        "message": "Lead status updated",
+        "lead": response.data[0]
     }
+
+
+# =========================
+# BATCH UPDATE LEAD STATUS
+# =========================
+
+@app.post("/leads/batch-status")
+def batch_update_lead_status(data: BatchStatusUpdate):
+    allowed_statuses = ["pending", "qualified", "contacted", "rejected"]
+    if data.contact_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Invalid contact status")
+    
+    if not data.lead_ids:
+        return {"success": True, "updated_count": 0}
+
+    response = supabase.table("leads").update({
+        "contact_status": data.contact_status
+    }).in_("id", data.lead_ids).execute()
+
+    return {
+        "success": True,
+        "message": f"Updated {len(response.data or [])} leads",
+        "updated_count": len(response.data or [])
+    }
+
+
+# (Export route moved above /leads/{lead_id} to fix FastAPI routing conflict)
+
+
+# =========================
+# TEST EMAIL SMTP
+# =========================
+
+@app.post("/admin/test-email")
+def test_email_smtp(req: TestEmailRequest):
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        return {
+            "success": False,
+            "message": "Gmail credentials not configured in backend environment."
+        }
+    
+    sent = send_lead_response(
+        email=req.target_email,
+        name="Admin Test",
+        message="This is a test email sent from your AI CRM Agent to verify SMTP configuration."
+    )
+
+    if sent:
+        return {"success": True, "message": f"Test email sent successfully to {req.target_email}"}
+    else:
+        return {"success": False, "message": "Failed to send test email. Check server logs."}
