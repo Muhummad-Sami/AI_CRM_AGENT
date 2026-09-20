@@ -66,15 +66,6 @@ function IconSettings({ size = 16 }: { size?: number }) {
   );
 }
 
-function IconForm({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2.5 3.5h11M2.5 7h7" />
-      <path d="M2.5 10.5h5" />
-      <path d="M11.5 9.5l3 3m-1.5-4.5a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0z" />
-    </svg>
-  );
-}
 
 function IconLogout({ size = 14 }: { size?: number }) {
   return (
@@ -163,7 +154,6 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
 
   const isActive = {
     dashboard: pathname === '/admin',
-    publicForm: pathname === '/',
     allLeads: pathname === '/admin/leads' && !statusParam,
     qualified: pathname === '/admin/leads' && statusParam === 'qualified',
     contacted: pathname === '/admin/leads' && statusParam === 'contacted',
@@ -201,16 +191,6 @@ function SidebarContent({ onClose }: { onClose: () => void }) {
           icon={<IconDashboard />}
           active={isActive.dashboard}
           onClick={onClose}
-        />
-        <NavLink
-          href="/"
-          label="Public Lead Form"
-          icon={<IconForm />}
-          active={isActive.publicForm}
-          onClick={() => {
-            onClose();
-            void logout('/');
-          }}
         />
 
         {/* Leads section */}
