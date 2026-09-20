@@ -47,7 +47,9 @@ export interface UpdateStatusResponse {
 
 
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
+// Strip any trailing slash to prevent double-slash URLs (e.g. if env var has trailing /)
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
+
 
 // ------ Fetch all leads ------
 // NOTE: Always routes through FastAPI backend (service role key).

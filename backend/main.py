@@ -52,24 +52,26 @@ app = FastAPI(
     version="1.0.0"
 )
 
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").rstrip("/")
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
+    "https://frontend-six-rose-93.vercel.app",  # your deployed frontend
 ]
-if FRONTEND_URL:
-    allowed_origins.append(FRONTEND_URL.rstrip("/"))
+if FRONTEND_URL and FRONTEND_URL not in allowed_origins:
+    allowed_origins.append(FRONTEND_URL)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https?://.*\.vercel\.app|http://(localhost|127\.0\.0\.1):[0-9]+",
+    allow_origin_regex=r"https://.*\.vercel\.app|http://(localhost|127\.0\.0\.1):[0-9]+",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
 
 
 # =========================
