@@ -2,6 +2,8 @@
 // API types and functions for AI CRM Agent frontend
 // ============================================================
 
+import { supabase } from '@/lib/supabase';
+
 export interface AiAnalysis {
   is_spam: boolean;
   score: number;
@@ -45,18 +47,34 @@ export interface UpdateStatusResponse {
   lead?: Lead;
 }
 
-
-
 // Strip any trailing slash to prevent double-slash URLs (e.g. if env var has trailing /)
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
 
+// ------ Helper: Authenticated request headers ------
+async function getAuthHeaders(includeContentType = true): Promise<HeadersInit> {
+  const headers: Record<string, string> = {};
+  if (includeContentType) {
+    headers['Content-Type'] = 'application/json';
+  }
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.access_token) {
+      headers['Authorization'] = `Bearer ${data.session.access_token}`;
+    }
+  } catch (err) {
+    console.warn('Could not retrieve Supabase auth token:', err);
+  }
+  return headers;
+}
 
-// ------ Fetch all leads ------
-// NOTE: Always routes through FastAPI backend (service role key).
-// Direct frontend→Supabase queries are intentionally removed — RLS blocks the anon key.
+// ------ Fetch all leads (Admin Protected) ------
 export async function fetchLeads(): Promise<LeadsResponse> {
   try {
-    const res = await fetch(`${API_BASE}/leads`, { cache: 'no-store' });
+    const headers = await getAuthHeaders(false);
+    const res = await fetch(`${API_BASE}/leads`, {
+      cache: 'no-store',
+      headers,
+    });
     if (!res.ok) {
       throw new Error(`GET /leads failed: ${res.status}`);
     }
@@ -67,10 +85,12 @@ export async function fetchLeads(): Promise<LeadsResponse> {
   }
 }
 
-// ------ Fetch single lead ------
+// ------ Fetch single lead (Admin Protected) ------
 export async function fetchLeadById(leadId: string): Promise<Lead> {
+  const headers = await getAuthHeaders(false);
   const res = await fetch(`${API_BASE}/leads/${leadId}`, {
     cache: 'no-store',
+    headers,
   });
   if (!res.ok) {
     throw new Error(`GET /leads/${leadId} failed: ${res.status}`);
@@ -79,11 +99,12 @@ export async function fetchLeadById(leadId: string): Promise<Lead> {
   return data.lead;
 }
 
-// ------ Update lead details ------
+// ------ Update lead details (Admin Protected) ------
 export async function updateLead(leadId: string, payload: Partial<Lead>): Promise<Lead> {
+  const headers = await getAuthHeaders(true);
   const res = await fetch(`${API_BASE}/leads/${leadId}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -93,10 +114,12 @@ export async function updateLead(leadId: string, payload: Partial<Lead>): Promis
   return data.lead;
 }
 
-// ------ Delete single lead ------
+// ------ Delete single lead (Admin Protected) ------
 export async function deleteLead(leadId: string): Promise<{ success: boolean; message: string }> {
+  const headers = await getAuthHeaders(false);
   const res = await fetch(`${API_BASE}/leads/${leadId}`, {
     method: 'DELETE',
+    headers,
   });
   if (!res.ok) {
     throw new Error(`DELETE /leads/${leadId} failed: ${res.status}`);
@@ -104,13 +127,14 @@ export async function deleteLead(leadId: string): Promise<{ success: boolean; me
   return res.json();
 }
 
-// ------ Batch delete leads ------
+// ------ Batch delete leads (Admin Protected) ------
 export async function batchDeleteLeads(
   leadIds: string[]
 ): Promise<{ success: boolean; message: string; deleted_count: number }> {
+  const headers = await getAuthHeaders(true);
   const res = await fetch(`${API_BASE}/leads/batch-delete`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ lead_ids: leadIds }),
   });
   if (!res.ok) {
@@ -119,14 +143,15 @@ export async function batchDeleteLeads(
   return res.json();
 }
 
-// ------ Update lead contact status ------
+// ------ Update lead contact status (Admin Protected) ------
 export async function updateLeadStatus(
   leadId: string,
   status: ContactStatus
 ): Promise<UpdateStatusResponse> {
+  const headers = await getAuthHeaders(true);
   const res = await fetch(`${API_BASE}/leads/${leadId}/status`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ contact_status: status }),
   });
   if (!res.ok) {
@@ -135,17 +160,19 @@ export async function updateLeadStatus(
   return res.json() as Promise<UpdateStatusResponse>;
 }
 
-// ------ Manually re-qualify a lead ------
+// ------ Manually re-qualify a lead (Admin Protected) ------
 export async function requalifyLead(leadId: string): Promise<void> {
+  const headers = await getAuthHeaders(false);
   const res = await fetch(`${API_BASE}/leads/${leadId}/qualify`, {
     method: 'POST',
+    headers,
   });
   if (!res.ok) {
     throw new Error(`POST /leads/${leadId}/qualify failed: ${res.status}`);
   }
 }
 
-// ------ Create and qualify lead ------
+// ------ Create and qualify lead (Public Customer Form) ------
 export interface CreateLeadPayload {
   name: string;
   email: string;
@@ -203,14 +230,15 @@ export async function loginAdmin(email: string, password: string): Promise<Login
   return res.json() as Promise<LoginResponse>;
 }
 
-// ------ Batch update lead status ------
+// ------ Batch update lead status (Admin Protected) ------
 export async function batchUpdateLeadStatus(
   leadIds: string[],
   status: ContactStatus
 ): Promise<{ success: boolean; message: string; updated_count: number }> {
+  const headers = await getAuthHeaders(true);
   const res = await fetch(`${API_BASE}/leads/batch-status`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ lead_ids: leadIds, contact_status: status }),
   });
   if (!res.ok) {
@@ -219,10 +247,12 @@ export async function batchUpdateLeadStatus(
   return res.json();
 }
 
-// ------ Export leads to CSV ------
+// ------ Export leads to CSV (Admin Protected) ------
 export async function exportLeadsCsv(): Promise<Blob> {
+  const headers = await getAuthHeaders(false);
   const res = await fetch(`${API_BASE}/leads/export`, {
     cache: 'no-store',
+    headers,
   });
   if (!res.ok) {
     throw new Error(`GET /leads/export failed: ${res.status}`);
@@ -230,13 +260,14 @@ export async function exportLeadsCsv(): Promise<Blob> {
   return res.blob();
 }
 
-// ------ Test SMTP connection ------
+// ------ Test SMTP connection (Admin Protected) ------
 export async function testSmtpConnection(
   targetEmail: string
 ): Promise<{ success: boolean; message: string }> {
+  const headers = await getAuthHeaders(true);
   const res = await fetch(`${API_BASE}/admin/test-email`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ target_email: targetEmail }),
   });
   if (!res.ok) {
@@ -246,7 +277,7 @@ export async function testSmtpConnection(
   return res.json();
 }
 
-// ------ Backend health ping ------
+// ------ Backend health ping (Public) ------
 export async function checkBackendHealth(): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/`, {
